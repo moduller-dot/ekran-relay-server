@@ -1,0 +1,9 @@
+services:
+    - type: web
+    name: ekran-relay-server
+    env: node
+    plan: free
+    buildCommand: npm install
+    startCommand: node server.js
+    autoDeploy: false
+    healthCheckPath: /
