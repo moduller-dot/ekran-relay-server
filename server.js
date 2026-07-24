@@ -102,6 +102,17 @@ io.on('connection', (socket) => {
     socket.to(roomId).emit('user-joined', { socketId: socket.id, isMaster: isMaster, connectedAt: timeString });
   });
 
+  // YENİ EKLENDİ: MASTER LİSTE İSTEYİNCE
+  socket.on('get-room-list', (roomId) => {
+    if (rooms[roomId]) {
+      console.log(`[ISTEK] ${socket.id} liste istedi: ${roomId}`);
+      io.to(roomId).emit('room:update', {
+        count: rooms[roomId].clients.length,
+        clients: rooms[roomId].clients
+      });
+    }
+  });
+
   // Master'dan gelen ekran verisini diğerlerine yayınla
   socket.on('screen-data', (roomId, data) => {
     if (rooms[roomId] && rooms[roomId].master === socket.id) {
