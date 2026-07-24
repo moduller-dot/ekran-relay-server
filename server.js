@@ -16,11 +16,37 @@ const io = new Server(server, {
 const PORT = process.env.PORT || 10000;
 
 // Oda sistemi: her "yayın" bir oda olacak
-// Her odada master, clients dizisi (detaylı nesnelerle) tutulur
 const rooms = {};
 
 io.on('connection', (socket) => {
   console.log('Bir cihaz baglandi:', socket.id);
+
+  // YENİ: MASTER ODA AÇSIN
+  socket.on('create-room', (roomId) => {
+    socket.join(roomId);
+    socket.roomId = roomId;
+    socket.isMaster = true;
+
+    // Odayı master ile başlat
+    rooms[roomId] = {
+      master: socket.id,
+      clients: [
+        {
+          socketId: socket.id,
+          deviceId: 'MASTER',
+          connectedAt: new Date().toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+        }
+      ]
+    };
+
+    console.log(`Oda olusturuldu: ${roomId} - Master: ${socket.id}`);
+
+    // Master a kendi listesini hemen gönder
+    io.to(roomId).emit('room:update', {
+      count: rooms[roomId].clients.length + 1,
+      clients: rooms[roomId].clients
+    });
+  });
 
   // Telefon veya Master odaya katılır
   socket.on('join-room', (data) => {
@@ -28,23 +54,20 @@ io.on('connection', (socket) => {
     const isMaster = data.isMaster;
     const deviceId = data.deviceId || socket.id;
 
+    if (!rooms[roomId]) return; // Oda yoksa çık
+
     socket.join(roomId);
     socket.roomId = roomId;
     socket.isMaster = isMaster;
 
-    if (!rooms[roomId]) {
-      rooms[roomId] = { master: null, clients: [] };
-    }
-
     const now = new Date();
-    // Türkiye saati (HH:mm:ss formatı için)
     const timeString = now.toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 
     if (isMaster) {
       rooms[roomId].master = socket.id;
       console.log(`Master odaya katildi: ${roomId}`);
     } else {
-      // Daha önce eklenmemişse listeye ekle
+      // Client ise listeye ekle
       const existingClientIndex = rooms[roomId].clients.findIndex(c => c.socketId === socket.id);
       if (existingClientIndex === -1) {
         rooms[roomId].clients.push({
@@ -57,9 +80,9 @@ io.on('connection', (socket) => {
     }
 
     // Oda güncellendiğinde hem toplam sayıyı hem de bağlı cihazların detaylı listesini gönderiyoruz
-    io.to(roomId).emit('room:update', { 
-      count: rooms[roomId].clients.length + (rooms[roomId].master ? 1 : 0),
-      clients: rooms[roomId].clients 
+    io.to(roomId).emit('room:update', {
+      count: rooms[roomId].clients.length + (rooms[roomId].master? 1 : 0),
+      clients: rooms[roomId].clients
     });
 
     // Yeni biri katıldı sinyali
@@ -86,17 +109,20 @@ io.on('connection', (socket) => {
     const roomId = socket.roomId;
     if (roomId && rooms[roomId]) {
       if (socket.isMaster) {
-        rooms[roomId].master = null;
+        delete rooms[roomId]; // Master çıkınca odayı komple sil
         io.to(roomId).emit('master-left');
+        console.log(`Oda kapatildi: ${roomId}`);
       } else {
-        rooms[roomId].clients = rooms[roomId].clients.filter(c => c.socketId !== socket.id);
+        rooms[roomId].clients = rooms[roomId].clients.filter(c => c.socketId!== socket.id);
       }
-      
+
       // Güncel listeyi odadaki herkese bildir
-      io.to(roomId).emit('room:update', { 
-        count: rooms[roomId].clients.length + (rooms[roomId].master ? 1 : 0),
-        clients: rooms[roomId].clients 
-      });
+      if(rooms[roomId]) {
+        io.to(roomId).emit('room:update', {
+          count: rooms[roomId].clients.length + (rooms[roomId].master? 1 : 0),
+          clients: rooms[roomId].clients
+        });
+      }
     }
   });
 });
