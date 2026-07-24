@@ -27,14 +27,17 @@ io.on('connection', (socket) => {
     socket.roomId = roomId;
     socket.isMaster = true;
 
-    // Odayı master ile başlat
+    const timeString = new Date().toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+
+    // Odayı master ile başlat. Masterı da clients içine atıyoruz
     rooms[roomId] = {
       master: socket.id,
       clients: [
         {
           socketId: socket.id,
-          deviceId: 'MASTER',
-          connectedAt: new Date().toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+          deviceId: 'Master Cihaz', // Flutter ile aynı olsun
+          role: 'MASTER',
+          connectedAt: timeString
         }
       ]
     };
@@ -43,7 +46,7 @@ io.on('connection', (socket) => {
 
     // Master a kendi listesini hemen gönder
     io.to(roomId).emit('room:update', {
-      count: rooms[roomId].clients.length + 1,
+      count: rooms[roomId].clients.length, // +1 e gerek yok artık
       clients: rooms[roomId].clients
     });
   });
@@ -60,8 +63,7 @@ io.on('connection', (socket) => {
     socket.roomId = roomId;
     socket.isMaster = isMaster;
 
-    const now = new Date();
-    const timeString = now.toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    const timeString = new Date().toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 
     if (isMaster) {
       rooms[roomId].master = socket.id;
@@ -73,6 +75,7 @@ io.on('connection', (socket) => {
         rooms[roomId].clients.push({
           socketId: socket.id,
           deviceId: deviceId,
+          role: 'CLIENT', // Flutter bunu kullanıyor
           connectedAt: timeString
         });
       }
@@ -81,7 +84,7 @@ io.on('connection', (socket) => {
 
     // Oda güncellendiğinde hem toplam sayıyı hem de bağlı cihazların detaylı listesini gönderiyoruz
     io.to(roomId).emit('room:update', {
-      count: rooms[roomId].clients.length + (rooms[roomId].master? 1 : 0),
+      count: rooms[roomId].clients.length, // Master da clients içinde
       clients: rooms[roomId].clients
     });
 
@@ -119,7 +122,7 @@ io.on('connection', (socket) => {
       // Güncel listeyi odadaki herkese bildir
       if(rooms[roomId]) {
         io.to(roomId).emit('room:update', {
-          count: rooms[roomId].clients.length + (rooms[roomId].master? 1 : 0),
+          count: rooms[roomId].clients.length,
           clients: rooms[roomId].clients
         });
       }
