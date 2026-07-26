@@ -90,6 +90,12 @@ io.on('connection', (socket) => {
       });
     }
 
+    // YENI: Eger broadcast devam ediyorsa yeni client'a bildir
+    if (rooms[roomId].isStreaming) {
+      socket.emit('stream-started');
+      console.log(`[SERVER] Sent stream-started to new client: ${deviceId}`);
+    }
+
     io.to(roomId).emit('room:update', {
       count: rooms[roomId].clients.length,
       clients: rooms[roomId].clients
