@@ -6,10 +6,7 @@ const app = express();
 const server = http.createServer(app);
 
 const io = new Server(server, {
-  cors: {
-    origin: "*",
-    methods: ["GET", "POST"]
-  },
+  cors: { origin: "*" },
   maxHttpBufferSize: 1e8
 });
 
@@ -28,19 +25,15 @@ io.on('connection', (socket) => {
 
     rooms[roomId] = {
       master: socket.id,
-      clients: [
-        {
-          socketId: socket.id,
-          deviceId: 'Master Device',
-          role: 'MASTER',
-          connectedAt: timeString
-        }
-      ],
+      clients: [{
+        socketId: socket.id,
+        deviceId: 'Master Device',
+        role: 'MASTER',
+        connectedAt: timeString
+      }],
       slotAssignments: {},
       isStreaming: false
     };
-
-    console.log(`[SERVER] Room created: ${roomId} - Master: ${socket.id}`);
 
     io.to(roomId).emit('room:update', {
       count: rooms[roomId].clients.length,
@@ -49,16 +42,11 @@ io.on('connection', (socket) => {
   });
 
   socket.on('join-room', (data) => {
-    console.log(`[SERVER] join-room received:`, JSON.stringify(data));
-
     const roomId = data.roomId;
     const isMaster = data.isMaster;
     const deviceId = data.deviceId || socket.id;
 
-    if (!rooms[roomId]) {
-      console.log(`[SERVER ERROR] Room not found: ${roomId}`);
-      return;
-    }
+    if (!rooms[roomId]) return;
 
     socket.join(roomId);
     socket.roomId = roomId;
@@ -68,32 +56,27 @@ io.on('connection', (socket) => {
 
     if (isMaster === true) {
       rooms[roomId].master = socket.id;
-      console.log(`[SERVER] Master joined room: ${roomId}`);
     } else {
-      const existingClientIndex = rooms[roomId].clients.findIndex(c => c.socketId === socket.id);
-      if (existingClientIndex === -1) {
+      const existing = rooms[roomId].clients.findIndex(c => c.socketId === socket.id);
+      if (existing === -1) {
         rooms[roomId].clients.push({
           socketId: socket.id,
           deviceId: deviceId,
           role: 'CLIENT',
           connectedAt: timeString
         });
-        console.log(`[SERVER] Client added: ${deviceId} - Room: ${roomId}`);
       }
     }
 
     const assignedSlot = assignSlot(roomId, socket.id);
     if (assignedSlot !== null) {
-      socket.emit('assign-slot', {
-        deviceId: deviceId,
-        slot: assignedSlot
-      });
+      socket.emit('assign-slot', { deviceId: deviceId, slot: assignedSlot });
     }
 
-    // YENI: Eger broadcast devam ediyorsa yeni client'a bildir
+    // YENI: Broadcast devam ediyorsa yeni client'a bildir
     if (rooms[roomId].isStreaming) {
       socket.emit('stream-started');
-      console.log(`[SERVER] Sent stream-started to new client: ${deviceId}`);
+      socket.emit('streamStarted'); // camelCase fallback
     }
 
     io.to(roomId).emit('room:update', {
@@ -110,7 +93,6 @@ io.on('connection', (socket) => {
 
   socket.on('get-room-list', (roomId) => {
     if (rooms[roomId]) {
-      console.log(`[SERVER] List requested by: ${socket.id} for room: ${roomId}`);
       io.to(roomId).emit('room:update', {
         count: rooms[roomId].clients.length,
         clients: rooms[roomId].clients
@@ -123,7 +105,8 @@ io.on('connection', (socket) => {
     if (rooms[roomId] && rooms[roomId].master === socket.id) {
       rooms[roomId].isStreaming = true;
       io.to(roomId).emit('stream-started');
-      console.log(`[SERVER] Stream started in room: ${roomId}`);
+      io.to(roomId).emit('streamStarted'); // camelCase fallback
+      console.log(`[SERVER] Stream started: ${roomId}`);
     }
   });
 
@@ -132,24 +115,28 @@ io.on('connection', (socket) => {
     if (rooms[roomId] && rooms[roomId].master === socket.id) {
       rooms[roomId].isStreaming = false;
       io.to(roomId).emit('stream-stopped');
-      console.log(`[SERVER] Stream stopped in room: ${roomId}`);
+      io.to(roomId).emit('streamStopped'); // camelCase fallback
     }
   });
 
+  // YENI: Frame routing - hem yeni hem eski format destekli
   socket.on('frame_data', (data) => {
     const roomId = socket.roomId;
-    if (rooms[roomId] && rooms[roomId].master === socket.id && rooms[roomId].isStreaming) {
-      const targetIndex = data.index;
-      const targetClient = rooms[roomId].clients.find((c) => {
-        return c.role === 'CLIENT' && rooms[roomId].slotAssignments[c.socketId] === targetIndex + 1;
-      });
-      
+    if (!rooms[roomId] || rooms[roomId].master !== socket.id || !rooms[roomId].isStreaming) return;
+
+    // Yeni format: targetDeviceId ile direkt routing
+    if (data.targetDeviceId) {
+      const targetClient = rooms[roomId].clients.find(c => 
+        c.role === 'CLIENT' && c.deviceId === data.targetDeviceId
+      );
       if (targetClient) {
         io.to(targetClient.socketId).emit('frame_data', data);
-      } else {
-        socket.to(roomId).emit('frame_data', data);
+        return;
       }
     }
+
+    // Eski format veya broadcast
+    socket.to(roomId).emit('frame_data', data);
   });
 
   socket.on('audio_data', (data) => {
@@ -160,20 +147,15 @@ io.on('connection', (socket) => {
   });
 
   socket.on('disconnect', () => {
-    console.log('[SERVER] Device disconnected:', socket.id);
     const roomId = socket.roomId;
     if (roomId && rooms[roomId]) {
       if (socket.isMaster) {
         delete rooms[roomId];
         io.to(roomId).emit('master-left');
-        console.log(`[SERVER] Room closed: ${roomId}`);
       } else {
-        const before = rooms[roomId].clients.length;
         rooms[roomId].clients = rooms[roomId].clients.filter(c => c.socketId !== socket.id);
         delete rooms[roomId].slotAssignments[socket.id];
-        console.log(`[SERVER] Client left. Before: ${before}, After: ${rooms[roomId].clients.length}`);
       }
-
       if (rooms[roomId]) {
         io.to(roomId).emit('room:update', {
           count: rooms[roomId].clients.length,
@@ -186,7 +168,6 @@ io.on('connection', (socket) => {
 
 function assignSlot(roomId, socketId) {
   if (!rooms[roomId]) return null;
-  
   const usedSlots = Object.values(rooms[roomId].slotAssignments);
   for (let i = 1; i <= 9; i++) {
     if (!usedSlots.includes(i)) {
@@ -197,10 +178,6 @@ function assignSlot(roomId, socketId) {
   return null;
 }
 
-app.get('/', (req, res) => {
-  res.send('Screen Relay Server Active!');
-});
+app.get('/', (req, res) => res.send('Screen Relay Server Active!'));
 
-server.listen(PORT, () => {
-  console.log(`[SERVER] WebSocket Relay Server running on port ${PORT}`);
-});
+server.listen(PORT, () => console.log(`[SERVER] Running on port ${PORT}`));
