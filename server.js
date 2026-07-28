@@ -7,7 +7,8 @@ const server = http.createServer(app);
 
 const io = new Server(server, {
   cors: { origin: "*" },
-  maxHttpBufferSize: 1e8
+  maxHttpBufferSize: 1e8,
+  perMessageDeflate: false
 });
 
 const PORT = process.env.PORT || 10000;
@@ -73,10 +74,9 @@ io.on('connection', (socket) => {
       socket.emit('assign-slot', { deviceId: deviceId, slot: assignedSlot });
     }
 
-    // YENI: Broadcast devam ediyorsa yeni client'a bildir
     if (rooms[roomId].isStreaming) {
       socket.emit('stream-started');
-      socket.emit('streamStarted'); // camelCase fallback
+      socket.emit('streamStarted');
     }
 
     io.to(roomId).emit('room:update', {
@@ -105,7 +105,7 @@ io.on('connection', (socket) => {
     if (rooms[roomId] && rooms[roomId].master === socket.id) {
       rooms[roomId].isStreaming = true;
       io.to(roomId).emit('stream-started');
-      io.to(roomId).emit('streamStarted'); // camelCase fallback
+      io.to(roomId).emit('streamStarted');
       console.log(`[SERVER] Stream started: ${roomId}`);
     }
   });
@@ -115,17 +115,25 @@ io.on('connection', (socket) => {
     if (rooms[roomId] && rooms[roomId].master === socket.id) {
       rooms[roomId].isStreaming = false;
       io.to(roomId).emit('stream-stopped');
-      io.to(roomId).emit('streamStopped'); // camelCase fallback
+      io.to(roomId).emit('streamStopped');
     }
   });
 
-  // YENI: Frame routing - hem yeni hem eski format destekli
+  // ===================================================================
+  // YENI: frame_data - HEM JSON HEM BINARY (JPEG) DESTEKLI
+  // ===================================================================
   socket.on('frame_data', (data) => {
     const roomId = socket.roomId;
     if (!rooms[roomId] || rooms[roomId].master !== socket.id || !rooms[roomId].isStreaming) return;
 
-    // Yeni format: targetDeviceId ile direkt routing
-    if (data.targetDeviceId) {
+    // BINARY FRAME: Buffer/Uint8Array geldi -> direkt broadcast
+    if (Buffer.isBuffer(data)) {
+      socket.to(roomId).emit('frame_data', data);
+      return;
+    }
+
+    // JSON FRAME: Eski format (targetDeviceId ile routing)
+    if (data && typeof data === 'object' && data.targetDeviceId) {
       const targetClient = rooms[roomId].clients.find(c => 
         c.role === 'CLIENT' && c.deviceId === data.targetDeviceId
       );
