@@ -13,6 +13,11 @@ const io = new Server(server, {
 
 const PORT = process.env.PORT || 10000;
 const rooms = {};
+const disconnectTimers = {}; // roomId -> Timeout
+
+// 🟢 Master kısa süreli koparsa (arka plana geçme, ağ dalgalanması vb.)
+// odayı hemen silme — bu süre içinde reconnect ederse yayın kesintisiz devam eder.
+const MASTER_GRACE_MS = 15000;
 
 io.on('connection', (socket) => {
   console.log('[SERVER] Device connected:', socket.id);
@@ -24,17 +29,36 @@ io.on('connection', (socket) => {
 
     const timeString = new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 
-    rooms[roomId] = {
-      master: socket.id,
-      clients: [{
-        socketId: socket.id,
-        deviceId: 'Master Device',
-        role: 'MASTER',
-        connectedAt: timeString
-      }],
-      slotAssignments: {},
-      isStreaming: false
-    };
+    // 🟢 Eğer bu roomId için bekleyen bir grace-period timer'ı varsa
+    // (aynı master reconnect ediyor demektir) iptal et ve odayı koru.
+    if (disconnectTimers[roomId]) {
+      clearTimeout(disconnectTimers[roomId]);
+      delete disconnectTimers[roomId];
+      console.log(`[SERVER] Master reconnect etti (create-room), oda korundu: ${roomId}`);
+    }
+
+    if (rooms[roomId] && rooms[roomId].pendingMasterSocketId) {
+      // Reconnect senaryosu: odayı koru, sadece master socket id'sini güncelle
+      rooms[roomId].master = socket.id;
+      rooms[roomId].pendingMasterSocketId = null;
+      const masterEntry = rooms[roomId].clients.find(c => c.role === 'MASTER');
+      if (masterEntry) {
+        masterEntry.socketId = socket.id;
+      }
+    } else {
+      rooms[roomId] = {
+        master: socket.id,
+        clients: [{
+          socketId: socket.id,
+          deviceId: 'Master Device',
+          role: 'MASTER',
+          connectedAt: timeString
+        }],
+        slotAssignments: {},
+        isStreaming: false,
+        pendingMasterSocketId: null
+      };
+    }
 
     io.to(roomId).emit('room:update', {
       count: rooms[roomId].clients.length,
@@ -56,7 +80,20 @@ io.on('connection', (socket) => {
     const timeString = new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 
     if (isMaster === true) {
+      // 🟢 Master reconnect ediyorsa grace timer'ı iptal et, odayı koru
+      if (disconnectTimers[roomId]) {
+        clearTimeout(disconnectTimers[roomId]);
+        delete disconnectTimers[roomId];
+        console.log(`[SERVER] Master reconnect etti (join-room), oda korundu: ${roomId}`);
+      }
       rooms[roomId].master = socket.id;
+      rooms[roomId].pendingMasterSocketId = null;
+
+      // Reconnect sonrası yayın hâlâ aktif olarak işaretliyse client'lara tekrar bildir
+      if (rooms[roomId].isStreaming) {
+        io.to(roomId).emit('stream-started');
+        io.to(roomId).emit('streamStarted');
+      }
     } else {
       const existing = rooms[roomId].clients.findIndex(c => c.socketId === socket.id);
       if (existing === -1) {
@@ -119,22 +156,17 @@ io.on('connection', (socket) => {
     }
   });
 
-  // ===================================================================
-  // YENI: frame_data - HEM JSON HEM BINARY (JPEG) DESTEKLI
-  // ===================================================================
   socket.on('frame_data', (data) => {
     const roomId = socket.roomId;
     if (!rooms[roomId] || rooms[roomId].master !== socket.id || !rooms[roomId].isStreaming) return;
 
-    // BINARY FRAME: Buffer/Uint8Array geldi -> direkt broadcast
     if (Buffer.isBuffer(data)) {
       socket.to(roomId).emit('frame_data', data);
       return;
     }
 
-    // JSON FRAME: Eski format (targetDeviceId ile routing)
     if (data && typeof data === 'object' && data.targetDeviceId) {
-      const targetClient = rooms[roomId].clients.find(c => 
+      const targetClient = rooms[roomId].clients.find(c =>
         c.role === 'CLIENT' && c.deviceId === data.targetDeviceId
       );
       if (targetClient) {
@@ -143,7 +175,6 @@ io.on('connection', (socket) => {
       }
     }
 
-    // Eski format veya broadcast
     socket.to(roomId).emit('frame_data', data);
   });
 
@@ -156,20 +187,30 @@ io.on('connection', (socket) => {
 
   socket.on('disconnect', () => {
     const roomId = socket.roomId;
-    if (roomId && rooms[roomId]) {
-      if (socket.isMaster) {
-        delete rooms[roomId];
-        io.to(roomId).emit('master-left');
-      } else {
-        rooms[roomId].clients = rooms[roomId].clients.filter(c => c.socketId !== socket.id);
-        delete rooms[roomId].slotAssignments[socket.id];
-      }
-      if (rooms[roomId]) {
-        io.to(roomId).emit('room:update', {
-          count: rooms[roomId].clients.length,
-          clients: rooms[roomId].clients
-        });
-      }
+    if (!roomId || !rooms[roomId]) return;
+
+    if (socket.isMaster) {
+      // 🟢 KRİTİK: Odayı ANINDA silmiyoruz. Grace period başlatıyoruz.
+      // Bu süre içinde master reconnect ederse (create-room veya join-room ile)
+      // oda ve yayın durumu korunur.
+      console.log(`[SERVER] Master disconnected, grace period başlıyor (${MASTER_GRACE_MS}ms): ${roomId}`);
+      rooms[roomId].pendingMasterSocketId = socket.id;
+
+      disconnectTimers[roomId] = setTimeout(() => {
+        if (rooms[roomId] && rooms[roomId].pendingMasterSocketId === socket.id) {
+          console.log(`[SERVER] Grace period doldu, oda siliniyor: ${roomId}`);
+          delete rooms[roomId];
+          io.to(roomId).emit('master-left');
+        }
+        delete disconnectTimers[roomId];
+      }, MASTER_GRACE_MS);
+    } else {
+      rooms[roomId].clients = rooms[roomId].clients.filter(c => c.socketId !== socket.id);
+      delete rooms[roomId].slotAssignments[socket.id];
+      io.to(roomId).emit('room:update', {
+        count: rooms[roomId].clients.length,
+        clients: rooms[roomId].clients
+      });
     }
   });
 });
