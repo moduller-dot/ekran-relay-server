@@ -13,10 +13,8 @@ const io = new Server(server, {
 
 const PORT = process.env.PORT || 10000;
 const rooms = {};
-const disconnectTimers = {}; // roomId -> Timeout
+const disconnectTimers = {};
 
-// 🟢 Master kısa süreli koparsa (arka plana geçme, ağ dalgalanması vb.)
-// odayı hemen silme — bu süre içinde reconnect ederse yayın kesintisiz devam eder.
 const MASTER_GRACE_MS = 15000;
 
 io.on('connection', (socket) => {
@@ -29,8 +27,6 @@ io.on('connection', (socket) => {
 
     const timeString = new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 
-    // 🟢 Eğer bu roomId için bekleyen bir grace-period timer'ı varsa
-    // (aynı master reconnect ediyor demektir) iptal et ve odayı koru.
     if (disconnectTimers[roomId]) {
       clearTimeout(disconnectTimers[roomId]);
       delete disconnectTimers[roomId];
@@ -38,7 +34,6 @@ io.on('connection', (socket) => {
     }
 
     if (rooms[roomId] && rooms[roomId].pendingMasterSocketId) {
-      // Reconnect senaryosu: odayı koru, sadece master socket id'sini güncelle
       rooms[roomId].master = socket.id;
       rooms[roomId].pendingMasterSocketId = null;
       const masterEntry = rooms[roomId].clients.find(c => c.role === 'MASTER');
@@ -56,7 +51,9 @@ io.on('connection', (socket) => {
         }],
         slotAssignments: {},
         isStreaming: false,
-        pendingMasterSocketId: null
+        pendingMasterSocketId: null,
+        streamWidth: null,
+        streamHeight: null
       };
     }
 
@@ -80,7 +77,6 @@ io.on('connection', (socket) => {
     const timeString = new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 
     if (isMaster === true) {
-      // 🟢 Master reconnect ediyorsa grace timer'ı iptal et, odayı koru
       if (disconnectTimers[roomId]) {
         clearTimeout(disconnectTimers[roomId]);
         delete disconnectTimers[roomId];
@@ -89,7 +85,6 @@ io.on('connection', (socket) => {
       rooms[roomId].master = socket.id;
       rooms[roomId].pendingMasterSocketId = null;
 
-      // Reconnect sonrası yayın hâlâ aktif olarak işaretliyse client'lara tekrar bildir
       if (rooms[roomId].isStreaming) {
         io.to(roomId).emit('stream-started');
         io.to(roomId).emit('streamStarted');
@@ -114,6 +109,14 @@ io.on('connection', (socket) => {
     if (rooms[roomId].isStreaming) {
       socket.emit('stream-started');
       socket.emit('streamStarted');
+    }
+
+    // 🟢 YENİ: Odaya sonradan katılan client, yayının mevcut çözünürlüğünü öğrenir
+    if (rooms[roomId].streamWidth && rooms[roomId].streamHeight) {
+      socket.emit('stream-resolution', {
+        width: rooms[roomId].streamWidth,
+        height: rooms[roomId].streamHeight
+      });
     }
 
     io.to(roomId).emit('room:update', {
@@ -156,6 +159,20 @@ io.on('connection', (socket) => {
     }
   });
 
+  // 🟢 YENİ: Yayın çözünürlüğü bilgisini sakla ve odaya yayınla
+  socket.on('stream-resolution', (data) => {
+    const roomId = data.roomId;
+    if (rooms[roomId] && rooms[roomId].master === socket.id) {
+      rooms[roomId].streamWidth = data.width;
+      rooms[roomId].streamHeight = data.height;
+      socket.to(roomId).emit('stream-resolution', {
+        width: data.width,
+        height: data.height
+      });
+      console.log(`[SERVER] Stream resolution: ${roomId} => ${data.width}x${data.height}`);
+    }
+  });
+
   socket.on('frame_data', (data) => {
     const roomId = socket.roomId;
     if (!rooms[roomId] || rooms[roomId].master !== socket.id || !rooms[roomId].isStreaming) return;
@@ -190,9 +207,6 @@ io.on('connection', (socket) => {
     if (!roomId || !rooms[roomId]) return;
 
     if (socket.isMaster) {
-      // 🟢 KRİTİK: Odayı ANINDA silmiyoruz. Grace period başlatıyoruz.
-      // Bu süre içinde master reconnect ederse (create-room veya join-room ile)
-      // oda ve yayın durumu korunur.
       console.log(`[SERVER] Master disconnected, grace period başlıyor (${MASTER_GRACE_MS}ms): ${roomId}`);
       rooms[roomId].pendingMasterSocketId = socket.id;
 
