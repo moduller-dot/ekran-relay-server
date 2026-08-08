@@ -30,7 +30,7 @@ io.on('connection', (socket) => {
     if (disconnectTimers[roomId]) {
       clearTimeout(disconnectTimers[roomId]);
       delete disconnectTimers[roomId];
-      console.log(`[SERVER] Master reconnect etti (create-room), oda korundu: ${roomId}`);
+      console.log(`[SERVER] Master reconnected (create-room), room preserved: ${roomId}`);
     }
 
     if (rooms[roomId] && rooms[roomId].pendingMasterSocketId) {
@@ -53,7 +53,8 @@ io.on('connection', (socket) => {
         isStreaming: false,
         pendingMasterSocketId: null,
         streamWidth: null,
-        streamHeight: null
+        streamHeight: null,
+        soundConfig: null
       };
     }
 
@@ -80,7 +81,7 @@ io.on('connection', (socket) => {
       if (disconnectTimers[roomId]) {
         clearTimeout(disconnectTimers[roomId]);
         delete disconnectTimers[roomId];
-        console.log(`[SERVER] Master reconnect etti (join-room), oda korundu: ${roomId}`);
+        console.log(`[SERVER] Master reconnected (join-room), room preserved: ${roomId}`);
       }
       rooms[roomId].master = socket.id;
       rooms[roomId].pendingMasterSocketId = null;
@@ -111,12 +112,16 @@ io.on('connection', (socket) => {
       socket.emit('streamStarted');
     }
 
-    // 🟢 YENİ: Odaya sonradan katılan client, yayının mevcut çözünürlüğünü öğrenir
     if (rooms[roomId].streamWidth && rooms[roomId].streamHeight) {
       socket.emit('stream-resolution', {
         width: rooms[roomId].streamWidth,
         height: rooms[roomId].streamHeight
       });
+    }
+
+    // 🟢 YENİ: Odaya sonradan katılan client, mevcut ses konfigürasyonunu öğrenir
+    if (rooms[roomId].soundConfig) {
+      socket.emit('sound-config', rooms[roomId].soundConfig);
     }
 
     io.to(roomId).emit('room:update', {
@@ -159,7 +164,6 @@ io.on('connection', (socket) => {
     }
   });
 
-  // 🟢 YENİ: Yayın çözünürlüğü bilgisini sakla ve odaya yayınla
   socket.on('stream-resolution', (data) => {
     const roomId = data.roomId;
     if (rooms[roomId] && rooms[roomId].master === socket.id) {
@@ -170,6 +174,20 @@ io.on('connection', (socket) => {
         height: data.height
       });
       console.log(`[SERVER] Stream resolution: ${roomId} => ${data.width}x${data.height}`);
+    }
+  });
+
+  // 🟢 YENİ: Ses modu + cihaz başına pan değerlerini sakla ve odaya yayınla
+  // data: { roomId, mode: 'standard' | 'surround3D', pans: { deviceId: panValue } }
+  socket.on('sound-config', (data) => {
+    const roomId = data.roomId;
+    if (rooms[roomId] && rooms[roomId].master === socket.id) {
+      rooms[roomId].soundConfig = {
+        mode: data.mode,
+        pans: data.pans || {}
+      };
+      socket.to(roomId).emit('sound-config', rooms[roomId].soundConfig);
+      console.log(`[SERVER] Sound config: ${roomId} => mode=${data.mode}`);
     }
   });
 
@@ -207,12 +225,12 @@ io.on('connection', (socket) => {
     if (!roomId || !rooms[roomId]) return;
 
     if (socket.isMaster) {
-      console.log(`[SERVER] Master disconnected, grace period başlıyor (${MASTER_GRACE_MS}ms): ${roomId}`);
+      console.log(`[SERVER] Master disconnected, grace period starting (${MASTER_GRACE_MS}ms): ${roomId}`);
       rooms[roomId].pendingMasterSocketId = socket.id;
 
       disconnectTimers[roomId] = setTimeout(() => {
         if (rooms[roomId] && rooms[roomId].pendingMasterSocketId === socket.id) {
-          console.log(`[SERVER] Grace period doldu, oda siliniyor: ${roomId}`);
+          console.log(`[SERVER] Grace period expired, deleting room: ${roomId}`);
           delete rooms[roomId];
           io.to(roomId).emit('master-left');
         }
